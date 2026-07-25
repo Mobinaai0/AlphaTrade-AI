@@ -13,8 +13,12 @@ from typing import Any
 from paper_trading import (
     AutomaticTradingEngine,
     COIN_IDS,
+    MarketOverview,
     PaperStore,
+    analyze_market,
+    build_snapshot,
     format_price,
+    format_large_number,
     persian_coin_name,
 )
 
@@ -27,6 +31,7 @@ logger = logging.getLogger("telegram-paper-bot")
 
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 MARKET_API_URL = "https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart"
+MARKET_OVERVIEW_API_URL = "https://api.coingecko.com/api/v3/coins/{coin_id}"
 ENGINE_INTERVAL_SECONDS = 15 * 60
 
 
@@ -78,6 +83,38 @@ def fetch_market_data(symbol: str) -> tuple[list[float], list[float]]:
     if len(volumes) < len(prices):
         volumes = ([volumes[0]] * (len(prices) - len(volumes))) + volumes
     return prices, volumes[-len(prices) :]
+
+
+def fetch_market_overview(symbol: str) -> MarketOverview:
+    coin_id = COIN_IDS[symbol]
+    query = urllib.parse.urlencode(
+        {
+            "localization": "false",
+            "tickers": "false",
+            "market_data": "true",
+            "community_data": "false",
+            "developer_data": "false",
+            "sparkline": "false",
+        }
+    )
+    request = urllib.request.Request(
+        f"{MARKET_OVERVIEW_API_URL.format(coin_id=coin_id)}?{query}",
+        headers={"User-Agent": "PersianPaperTradingBot/1.0"},
+    )
+    with urllib.request.urlopen(request, timeout=30) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+    market_data = payload.get("market_data") or {}
+    current_price = float((market_data.get("current_price") or {}).get("usd", 0))
+    if current_price <= 0:
+        raise RuntimeError(f"Current market price is unavailable for {symbol}")
+    return MarketOverview(
+        symbol=symbol,
+        current_price=current_price,
+        price_change_24h=float(market_data.get("price_change_percentage_24h") or 0),
+        market_cap_rank=payload.get("market_cap_rank"),
+        market_cap=float((market_data.get("market_cap") or {}).get("usd", 0)),
+        volume_24h=float((market_data.get("total_volume") or {}).get("usd", 0)),
+    )
 
 
 class BotApplication:
@@ -134,6 +171,7 @@ class BotApplication:
             "/auto_on": self._auto_on,
             "/auto_off": self._auto_off,
             "/coin": self._coin,
+            "/analysis": self._analysis,
             "/status": self._status,
             "/history": self._history,
         }
@@ -163,6 +201,7 @@ class BotApplication:
                     "",
                     "/paper_on فعال‌سازی حساب معاملات آزمایشی",
                     "/coin BTC انتخاب ارز، نمونه: BTC یا ETH",
+                    "/analysis BTC دریافت تحلیل حرفه‌ای بازار",
                     "/auto_on فعال‌سازی معاملات خودکار",
                     "/auto_off غیرفعال‌سازی معاملات خودکار",
                     "/status نمایش وضعیت حساب و معامله باز",
@@ -233,6 +272,61 @@ class BotApplication:
             f"✅ ارز انتخاب‌شده به {persian_coin_name(symbol)} تغییر کرد.\n"
             "این انتخاب در چرخه‌ی تحلیل بعدی استفاده می‌شود.",
         )
+
+    def _analysis(self, user_id: int, chat_id: int, symbol: str) -> None:
+        if not symbol:
+            self.client.send_message(
+                chat_id,
+                "لطفاً نماد ارز را وارد کنید.\nنمونه: /analysis BTC",
+            )
+            return
+        if symbol not in COIN_IDS:
+            self.client.send_message(
+                chat_id,
+                "این ارز برای تحلیل پشتیبانی نمی‌شود.\n"
+                "ارزهای قابل تحلیل: BTC، ETH، SOL، BNB، XRP، ADA، DOGE، AVAX، DOT، LINK",
+            )
+            return
+        try:
+            overview = fetch_market_overview(symbol)
+            prices, volumes = fetch_market_data(symbol)
+            snapshot = build_snapshot(symbol, prices, volumes)
+            trend, risk, confidence, recommendation, explanation = analyze_market(
+                overview, snapshot
+            )
+            rank = (
+                f"رتبه {overview.market_cap_rank}"
+                if overview.market_cap_rank is not None
+                else "نامشخص"
+            )
+            report = "\n".join(
+                [
+                    f"📊 گزارش تحلیل {persian_coin_name(symbol)}",
+                    "",
+                    f"💰 قیمت فعلی: {format_price(overview.current_price)} دلار",
+                    f"📈 تغییر قیمت ۲۴ ساعت: {overview.price_change_24h:+.2f}٪",
+                    f"🏆 رتبه بازار: {rank}",
+                    f"🏦 ارزش بازار: {format_large_number(overview.market_cap)} دلار",
+                    f"📦 حجم معاملات ۲۴ ساعت: {format_large_number(overview.volume_24h)} دلار",
+                    "",
+                    f"روند بازار: {trend}",
+                    f"سطح ریسک: {risk}",
+                    f"شاخص اطمینان: {confidence} از ۱۰۰",
+                    f"پیشنهاد: {recommendation}",
+                    "",
+                    "دلیل تحلیل:",
+                    explanation,
+                    "",
+                    "این گزارش صرفاً تحلیلی است و هیچ معامله‌ای انجام نمی‌دهد.",
+                ]
+            )
+            self.client.send_message(chat_id, report)
+        except Exception:
+            logger.exception("Market analysis failed for %s", symbol)
+            self.client.send_message(
+                chat_id,
+                "در حال حاضر دریافت داده‌های بازار ممکن نیست. لطفاً کمی بعد دوباره تلاش کنید.",
+            )
 
     def _status(self, user_id: int, chat_id: int, _: str) -> None:
         account = self.store.get_account(user_id)

@@ -36,6 +36,16 @@ class MarketSnapshot:
 
 
 @dataclass(frozen=True)
+class MarketOverview:
+    symbol: str
+    current_price: float
+    price_change_24h: float
+    market_cap_rank: int | None
+    market_cap: float
+    volume_24h: float
+
+
+@dataclass(frozen=True)
 class PaperPosition:
     user_id: int
     chat_id: int
@@ -540,3 +550,83 @@ def format_price(value: float) -> str:
     if value >= 1:
         return f"{value:,.4f}"
     return f"{value:,.8f}"
+
+
+def format_large_number(value: float) -> str:
+    if abs(value) >= 1_000_000_000:
+        return f"{value / 1_000_000_000:,.2f} میلیارد"
+    if abs(value) >= 1_000_000:
+        return f"{value / 1_000_000:,.2f} میلیون"
+    if abs(value) >= 1_000:
+        return f"{value / 1_000:,.2f} هزار"
+    return f"{value:,.2f}"
+
+
+def analyze_market(
+    overview: MarketOverview, snapshot: MarketSnapshot
+) -> tuple[str, str, int, str, str]:
+    """Return Persian trend, risk, confidence, recommendation, and explanation."""
+    bullish_points = sum(
+        [
+            snapshot.ema_fast > snapshot.ema_slow,
+            snapshot.macd > snapshot.macd_signal,
+            overview.price_change_24h > 0,
+            snapshot.rsi >= 50,
+        ]
+    )
+    bearish_points = sum(
+        [
+            snapshot.ema_fast < snapshot.ema_slow,
+            snapshot.macd < snapshot.macd_signal,
+            overview.price_change_24h < 0,
+            snapshot.rsi < 50,
+        ]
+    )
+
+    if bullish_points >= 3 and bullish_points > bearish_points:
+        trend = "صعودی"
+    elif bearish_points >= 3 and bearish_points > bullish_points:
+        trend = "نزولی"
+    else:
+        trend = "خنثی"
+
+    volatility = abs(overview.price_change_24h)
+    if volatility >= 8 or snapshot.rsi >= 75 or snapshot.rsi <= 25:
+        risk = "زیاد"
+    elif volatility >= 4 or snapshot.rsi >= 70 or snapshot.rsi <= 30:
+        risk = "متوسط"
+    else:
+        risk = "کم"
+
+    confidence = snapshot.confidence
+    if trend == "صعودی" and overview.price_change_24h > 0:
+        confidence += 10
+    elif trend == "نزولی" and overview.price_change_24h < 0:
+        confidence += 10
+    elif trend == "خنثی":
+        confidence -= 5
+    if risk == "زیاد":
+        confidence -= 10
+    confidence = max(0, min(100, confidence))
+
+    if trend == "صعودی" and risk != "زیاد" and confidence >= 70:
+        recommendation = "خرید"
+    elif trend == "نزولی" and confidence >= 65:
+        recommendation = "صبر"
+    elif risk == "زیاد" or confidence < 50:
+        recommendation = "صبر"
+    else:
+        recommendation = "نگهداری"
+
+    reasons = [
+        f"روند کوتاه‌مدت با مقایسه میانگین‌های نمایی {trend} ارزیابی شد",
+        f"شاخص قدرت نسبی روی {snapshot.rsi:.1f} قرار دارد",
+        f"مکدی {'تأییدکننده حرکت صعودی است' if snapshot.macd > snapshot.macd_signal else 'تأییدکننده حرکت صعودی نیست'}",
+        f"تغییر ۲۴ ساعته {overview.price_change_24h:+.2f} درصد بوده است",
+    ]
+    if snapshot.volume_ratio >= 1:
+        reasons.append("حجم فعلی برابر یا بیشتر از میانگین اخیر است")
+    else:
+        reasons.append("حجم فعلی پایین‌تر از میانگین اخیر است")
+    explanation = "؛ ".join(reasons) + f". بنابراین پیشنهاد نهایی «{recommendation}» است."
+    return trend, risk, confidence, recommendation, explanation
