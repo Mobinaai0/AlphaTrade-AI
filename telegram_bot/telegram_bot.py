@@ -161,7 +161,7 @@ class BotApplication:
                 [
                     "راهنمای ربات معاملات آزمایشی",
                     "",
-                    "/paper_on فعال‌سازی حساب Paper Trading",
+                    "/paper_on فعال‌سازی حساب معاملات آزمایشی",
                     "/coin BTC انتخاب ارز، نمونه: BTC یا ETH",
                     "/auto_on فعال‌سازی معاملات خودکار",
                     "/auto_off غیرفعال‌سازی معاملات خودکار",
@@ -178,7 +178,7 @@ class BotApplication:
         account = self.store.activate_account(user_id, chat_id)
         self.client.send_message(
             chat_id,
-            f"✅ حساب Paper Trading فعال شد.\n"
+            f"✅ حساب معاملات آزمایشی فعال شد.\n"
             f"موجودی آزمایشی: {account['balance']:,.2f} دلار\n"
             f"ارز انتخاب‌شده: {persian_coin_name(account['symbol'])}\n\n"
             "برای شروع معاملات خودکار، /auto_on را بفرستید.",
@@ -189,7 +189,7 @@ class BotApplication:
         if not account or not account["is_active"]:
             self.client.send_message(
                 chat_id,
-                "ابتدا حساب Paper Trading را با /paper_on فعال کنید.",
+                "ابتدا حساب معاملات آزمایشی را با /paper_on فعال کنید.",
             )
             return
         self.client.send_message(
@@ -225,7 +225,7 @@ class BotApplication:
         if not account or not account["is_active"]:
             self.client.send_message(
                 chat_id,
-                "ابتدا حساب Paper Trading را با /paper_on فعال کنید.",
+                "ابتدا حساب معاملات آزمایشی را با /paper_on فعال کنید.",
             )
             return
         self.client.send_message(
@@ -244,7 +244,7 @@ class BotApplication:
             return
         position = self.store.get_position(user_id)
         lines = [
-            "وضعیت حساب Paper Trading",
+            "وضعیت حساب معاملات آزمایشی",
             "",
             f"موجودی: {account['balance']:,.2f} دلار",
             f"ارز انتخاب‌شده: {persian_coin_name(account['symbol'])}",
@@ -274,7 +274,11 @@ class BotApplication:
             return
         lines = ["📚 تاریخچه معاملات", ""]
         for index, trade in enumerate(trades, 1):
-            date = trade["exit_time"].replace("T", " ").replace("+00:00", " UTC")
+            date = (
+                trade["exit_time"]
+                .replace("T", " ")
+                .replace("+00:00", " زمان هماهنگ جهانی")
+            )
             lines.extend(
                 [
                     f"معامله {index} — {persian_coin_name(trade['symbol'])}",

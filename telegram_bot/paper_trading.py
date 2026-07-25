@@ -453,7 +453,7 @@ class AutomaticTradingEngine:
                     f"حد سود: {format_price(take_profit)} دلار",
                     f"امتیاز اطمینان: {snapshot.confidence}٪",
                     "",
-                    "این معامله کاملاً آزمایشی و Paper Trading است.",
+                    "این معامله کاملاً آزمایشی است و پول واقعی در آن استفاده نمی‌شود.",
                 ]
             ),
         )
@@ -481,7 +481,7 @@ class AutomaticTradingEngine:
                     f"درصد سود/زیان: {pnl_percent:+.2f}٪",
                     f"دلیل خروج: {reason}",
                     "",
-                    "این معامله کاملاً آزمایشی و Paper Trading بود.",
+                    "این معامله کاملاً آزمایشی بود و پول واقعی در آن استفاده نشد.",
                 ]
             ),
         )

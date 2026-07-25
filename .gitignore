@@ -50,4 +50,5 @@ Thumbs.db
 
 # Local paper-trading state
 telegram_bot/paper_trading.db
+telegram_bot/paper_trading.db-*
 telegram_bot/__pycache__/
