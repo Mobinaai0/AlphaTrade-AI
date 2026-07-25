@@ -1,0 +1,1 @@
+"""Automatic Persian Telegram paper-trading bot."""

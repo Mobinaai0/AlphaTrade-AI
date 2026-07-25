@@ -1,10 +1,11 @@
-# [Project name]
+# Persian Crypto Paper Trader
 
-_Replace the heading above with the project's name, and this line with one sentence describing what this app does for users._
+یک ربات تلگرام فارسی برای تحلیل بازار و معاملات کاملاً آزمایشی (Paper Trading).
 
 ## Run & Operate
 
 - `pnpm --filter @workspace/api-server run dev` — run the API server (port 5000)
+- `python3 telegram_bot/telegram_bot.py` — run the Telegram paper-trading bot
 - `pnpm run typecheck` — full typecheck across all packages
 - `pnpm run build` — typecheck + build all packages
 - `pnpm --filter @workspace/api-spec run codegen` — regenerate API hooks and Zod schemas from the OpenAPI spec
@@ -22,23 +23,33 @@ _Replace the heading above with the project's name, and this line with one sente
 
 ## Where things live
 
-_Populate as you build — short repo map plus pointers to the source-of-truth file for DB schema, API contracts, theme files, etc._
+- `telegram_bot/telegram_bot.py` — Telegram polling, Persian commands, and 15-minute scheduler.
+- `telegram_bot/paper_trading.py` — SQLite store, indicators, risk management, and automatic engine.
+- `telegram_bot/paper_trading.db` — local runtime state (ignored from version control).
 
 ## Architecture decisions
 
-_Populate as you build — non-obvious choices a reader couldn't infer from the code (3-5 bullets)._
+- Market data is read from CoinGecko's public market-data API; no exchange API or order endpoint is used.
+- SQLite stores accounts, the single open position per user, and completed trade history.
+- Automatic evaluation runs in a background thread every 15 minutes while Telegram long polling runs in the main thread.
+- All Telegram-facing text is Persian; source code identifiers and documentation remain English.
 
 ## Product
 
-_Describe the high-level user-facing capabilities of this app once they exist._
+- Persian Telegram commands for activating paper accounts, selecting supported coins, and toggling automatic trading.
+- EMA, RSI, MACD, trend strength, volume ratio, and confidence-score based entries.
+- Automatic stop-loss, take-profit, exit-condition, and strong-trend-reversal handling with immediate notifications.
 
 ## User preferences
 
-_Populate as you build — explicit user instructions worth remembering across sessions._
+- Keep all code in English.
+- Keep every message shown to Telegram users completely in Persian.
+- Keep the system Paper Trading only; do not connect to exchanges or use real money.
 
 ## Gotchas
 
-_Populate as you build — sharp edges, "always run X before Y" rules._
+- `TELEGRAM_BOT_TOKEN` must be stored as a secret before the bot workflow can start.
+- CoinGecko market data can be temporarily rate-limited; the automatic cycle logs the failure and retries at the next 15-minute interval.
 
 ## Pointers
 

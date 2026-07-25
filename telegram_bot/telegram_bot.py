@@ -1,0 +1,299 @@
+from __future__ import annotations
+
+import json
+import logging
+import os
+import threading
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from typing import Any
+
+from paper_trading import (
+    AutomaticTradingEngine,
+    COIN_IDS,
+    PaperStore,
+    format_price,
+    persian_coin_name,
+)
+
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
+logger = logging.getLogger("telegram-paper-bot")
+
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+MARKET_API_URL = "https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart"
+ENGINE_INTERVAL_SECONDS = 15 * 60
+
+
+class TelegramClient:
+    def __init__(self, token: str) -> None:
+        if not token:
+            raise RuntimeError("TELEGRAM_BOT_TOKEN is not configured")
+        self.base_url = f"https://api.telegram.org/bot{token}"
+
+    def request(self, method: str, payload: dict[str, Any]) -> Any:
+        encoded = urllib.parse.urlencode(payload).encode("utf-8")
+        request = urllib.request.Request(
+            f"{self.base_url}/{method}",
+            data=encoded,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        with urllib.request.urlopen(request, timeout=60) as response:
+            body = json.loads(response.read().decode("utf-8"))
+        if not body.get("ok"):
+            raise RuntimeError(f"Telegram API error in {method}: {body}")
+        return body["result"]
+
+    def send_message(self, chat_id: int, text: str) -> None:
+        self.request("sendMessage", {"chat_id": chat_id, "text": text})
+
+    def updates(self, offset: int | None) -> list[dict[str, Any]]:
+        payload: dict[str, Any] = {"timeout": 50, "allowed_updates": '["message"]'}
+        if offset is not None:
+            payload["offset"] = offset
+        return self.request("getUpdates", payload)
+
+
+def fetch_market_data(symbol: str) -> tuple[list[float], list[float]]:
+    coin_id = COIN_IDS[symbol]
+    url = MARKET_API_URL.format(coin_id=coin_id)
+    query = urllib.parse.urlencode(
+        {"vs_currency": "usd", "days": "30", "interval": "hourly"}
+    )
+    request = urllib.request.Request(
+        f"{url}?{query}",
+        headers={"User-Agent": "PersianPaperTradingBot/1.0"},
+    )
+    with urllib.request.urlopen(request, timeout=30) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+    prices = [float(item[1]) for item in payload.get("prices", [])]
+    volumes = [float(item[1]) for item in payload.get("total_volumes", [])]
+    if len(prices) < 30 or not volumes:
+        raise RuntimeError(f"Insufficient public market data for {symbol}")
+    if len(volumes) < len(prices):
+        volumes = ([volumes[0]] * (len(prices) - len(volumes))) + volumes
+    return prices, volumes[-len(prices) :]
+
+
+class BotApplication:
+    def __init__(self, client: TelegramClient) -> None:
+        self.client = client
+        self.store = PaperStore()
+        self.engine = AutomaticTradingEngine(
+            store=self.store,
+            market_data=fetch_market_data,
+            notify=self.client.send_message,
+        )
+
+    def run(self) -> None:
+        threading.Thread(
+            target=self._engine_loop, name="paper-trading-engine", daemon=True
+        ).start()
+        offset: int | None = None
+        logger.info("Telegram paper-trading bot started")
+        while True:
+            try:
+                for update in self.client.updates(offset):
+                    offset = update["update_id"] + 1
+                    self._handle_update(update)
+            except (urllib.error.URLError, TimeoutError, RuntimeError):
+                logger.exception("Telegram polling failed; retrying")
+                time.sleep(5)
+            except Exception:
+                logger.exception("Unexpected polling error; retrying")
+                time.sleep(5)
+
+    def _engine_loop(self) -> None:
+        time.sleep(5)
+        while True:
+            try:
+                logger.info("Running automatic paper-trading cycle")
+                self.engine.run_once()
+            except Exception:
+                logger.exception("Automatic engine cycle failed")
+            time.sleep(ENGINE_INTERVAL_SECONDS)
+
+    def _handle_update(self, update: dict[str, Any]) -> None:
+        message = update.get("message")
+        if not message or not message.get("text"):
+            return
+        chat_id = int(message["chat"]["id"])
+        user_id = int(message["from"]["id"])
+        parts = message["text"].strip().split()
+        command = parts[0].split("@")[0].lower()
+        argument = parts[1].upper() if len(parts) > 1 else ""
+        handlers = {
+            "/start": self._start,
+            "/help": self._help,
+            "/paper_on": self._paper_on,
+            "/auto_on": self._auto_on,
+            "/auto_off": self._auto_off,
+            "/coin": self._coin,
+            "/status": self._status,
+            "/history": self._history,
+        }
+        handler = handlers.get(command)
+        if handler:
+            handler(user_id, chat_id, argument)
+        else:
+            self.client.send_message(
+                chat_id,
+                "دستور شناخته نشد. برای دیدن فهرست دستورات، /help را بفرستید.",
+            )
+
+    def _start(self, user_id: int, chat_id: int, _: str) -> None:
+        self.client.send_message(
+            chat_id,
+            "سلام! به ربات تحلیل و معاملات آزمایشی خوش آمدید.\n\n"
+            "برای شروع حساب مجازی خود را با /paper_on فعال کنید.\n"
+            "هیچ پول واقعی یا سفارش صرافی در این ربات استفاده نمی‌شود.",
+        )
+
+    def _help(self, user_id: int, chat_id: int, _: str) -> None:
+        self.client.send_message(
+            chat_id,
+            "\n".join(
+                [
+                    "راهنمای ربات معاملات آزمایشی",
+                    "",
+                    "/paper_on فعال‌سازی حساب Paper Trading",
+                    "/coin BTC انتخاب ارز، نمونه: BTC یا ETH",
+                    "/auto_on فعال‌سازی معاملات خودکار",
+                    "/auto_off غیرفعال‌سازی معاملات خودکار",
+                    "/status نمایش وضعیت حساب و معامله باز",
+                    "/history نمایش تاریخچه معاملات تکمیل‌شده",
+                    "/help نمایش همین راهنما",
+                    "",
+                    "تحلیل خودکار هر ۱۵ دقیقه انجام می‌شود.",
+                ]
+            ),
+        )
+
+    def _paper_on(self, user_id: int, chat_id: int, _: str) -> None:
+        account = self.store.activate_account(user_id, chat_id)
+        self.client.send_message(
+            chat_id,
+            f"✅ حساب Paper Trading فعال شد.\n"
+            f"موجودی آزمایشی: {account['balance']:,.2f} دلار\n"
+            f"ارز انتخاب‌شده: {persian_coin_name(account['symbol'])}\n\n"
+            "برای شروع معاملات خودکار، /auto_on را بفرستید.",
+        )
+
+    def _auto_on(self, user_id: int, chat_id: int, _: str) -> None:
+        account = self.store.set_auto_trading(user_id, True)
+        if not account or not account["is_active"]:
+            self.client.send_message(
+                chat_id,
+                "ابتدا حساب Paper Trading را با /paper_on فعال کنید.",
+            )
+            return
+        self.client.send_message(
+            chat_id,
+            f"✅ معاملات خودکار فعال شد.\n"
+            f"ارز انتخاب‌شده: {persian_coin_name(account['symbol'])}\n"
+            "ربات هر ۱۵ دقیقه بازار را بررسی می‌کند.",
+        )
+
+    def _auto_off(self, user_id: int, chat_id: int, _: str) -> None:
+        account = self.store.set_auto_trading(user_id, False)
+        if not account or not account["is_active"]:
+            self.client.send_message(
+                chat_id,
+                "حساب فعالی پیدا نشد. برای شروع /paper_on را بفرستید.",
+            )
+            return
+        self.client.send_message(
+            chat_id,
+            "⏸ معاملات خودکار غیرفعال شد.\n"
+            "معامله‌ی باز بدون تغییر باقی می‌ماند و با /auto_on ادامه پیدا می‌کند.",
+        )
+
+    def _coin(self, user_id: int, chat_id: int, symbol: str) -> None:
+        if symbol not in COIN_IDS:
+            self.client.send_message(
+                chat_id,
+                "این ارز پشتیبانی نمی‌شود.\n"
+                "ارزهای قابل انتخاب: BTC، ETH، SOL، BNB، XRP، ADA، DOGE، AVAX، DOT، LINK",
+            )
+            return
+        account = self.store.set_symbol(user_id, symbol)
+        if not account or not account["is_active"]:
+            self.client.send_message(
+                chat_id,
+                "ابتدا حساب Paper Trading را با /paper_on فعال کنید.",
+            )
+            return
+        self.client.send_message(
+            chat_id,
+            f"✅ ارز انتخاب‌شده به {persian_coin_name(symbol)} تغییر کرد.\n"
+            "این انتخاب در چرخه‌ی تحلیل بعدی استفاده می‌شود.",
+        )
+
+    def _status(self, user_id: int, chat_id: int, _: str) -> None:
+        account = self.store.get_account(user_id)
+        if not account or not account["is_active"]:
+            self.client.send_message(
+                chat_id,
+                "حساب فعالی ندارید. برای شروع /paper_on را بفرستید.",
+            )
+            return
+        position = self.store.get_position(user_id)
+        lines = [
+            "وضعیت حساب Paper Trading",
+            "",
+            f"موجودی: {account['balance']:,.2f} دلار",
+            f"ارز انتخاب‌شده: {persian_coin_name(account['symbol'])}",
+            f"معاملات خودکار: {'فعال' if account['auto_trading_enabled'] else 'غیرفعال'}",
+        ]
+        if position:
+            lines.extend(
+                [
+                    "",
+                    "معامله‌ی باز:",
+                    f"قیمت ورود: {format_price(position.entry_price)} دلار",
+                    f"حد ضرر: {format_price(position.stop_loss)} دلار",
+                    f"حد سود: {format_price(position.take_profit)} دلار",
+                ]
+            )
+        else:
+            lines.extend(["", "در حال حاضر معامله‌ی بازی ندارید."])
+        self.client.send_message(chat_id, "\n".join(lines))
+
+    def _history(self, user_id: int, chat_id: int, _: str) -> None:
+        trades = self.store.history(user_id)
+        if not trades:
+            self.client.send_message(
+                chat_id,
+                "هنوز معامله‌ی تکمیل‌شده‌ای در تاریخچه وجود ندارد.",
+            )
+            return
+        lines = ["📚 تاریخچه معاملات", ""]
+        for index, trade in enumerate(trades, 1):
+            date = trade["exit_time"].replace("T", " ").replace("+00:00", " UTC")
+            lines.extend(
+                [
+                    f"معامله {index} — {persian_coin_name(trade['symbol'])}",
+                    f"ورود: {format_price(trade['entry_price'])} دلار",
+                    f"خروج: {format_price(trade['exit_price'])} دلار",
+                    f"سود/زیان: {trade['pnl']:+,.2f} دلار",
+                    f"درصد سود/زیان: {trade['pnl_percent']:+.2f}٪",
+                    f"دلیل خروج: {trade['close_reason']}",
+                    f"تاریخ: {date}",
+                    "",
+                ]
+            )
+        self.client.send_message(chat_id, "\n".join(lines).strip())
+
+
+def main() -> None:
+    application = BotApplication(TelegramClient(TELEGRAM_BOT_TOKEN))
+    application.run()
+
+
+if __name__ == "__main__":
+    main()
