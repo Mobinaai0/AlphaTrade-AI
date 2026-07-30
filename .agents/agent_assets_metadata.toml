@@ -1,0 +1,8 @@
+uploads = []
+generated = []
+
+[[outputs]]
+id = "6tcx6in9JaVrNFMVB-OCx"
+uri = "file://persian_paper_trading_bot_backup.zip"
+type = "unspecified"
+title = "Persian Paper Trading Bot — Source Backup"
