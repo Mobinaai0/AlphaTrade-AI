@@ -25,6 +25,9 @@ class MarketSnapshot:
     trend_strength: float
     volume_ratio: float
     confidence: int
+    ema_20: float = 0.0
+    ema_50: float = 0.0
+    atr: float = 0.0
 
     @property
     def bullish(self) -> bool:
@@ -43,6 +46,25 @@ class MarketOverview:
     market_cap_rank: int | None
     market_cap: float
     volume_24h: float
+
+
+@dataclass(frozen=True)
+class AnalysisFactor:
+    name: str
+    status: str
+    score: int
+    weight: int
+    reason: str
+
+
+@dataclass(frozen=True)
+class AnalysisResult:
+    trend: str
+    risk: str
+    factors: tuple[AnalysisFactor, ...]
+    confidence: int
+    recommendation: str
+    explanation: str
 
 
 @dataclass(frozen=True)
@@ -336,10 +358,40 @@ def relative_strength_index(values: list[float], period: int = 14) -> float:
     return 100 - (100 / (1 + average_gain / average_loss))
 
 
+def average_true_range(
+    prices: list[float],
+    highs: list[float] | None = None,
+    lows: list[float] | None = None,
+    period: int = 14,
+) -> float:
+    """Calculate ATR, falling back to close-to-close ranges when needed."""
+    if len(prices) < 2:
+        return 0.0
+    true_ranges: list[float] = []
+    if highs is not None and lows is not None:
+        usable = min(len(prices), len(highs), len(lows))
+        for index in range(usable):
+            previous_close = prices[index - 1] if index else prices[index]
+            true_ranges.append(
+                max(
+                    highs[index] - lows[index],
+                    abs(highs[index] - previous_close),
+                    abs(lows[index] - previous_close),
+                )
+            )
+    else:
+        true_ranges = [abs(after - before) for before, after in zip(prices, prices[1:])]
+    if not true_ranges:
+        return 0.0
+    return sum(true_ranges[-period:]) / len(true_ranges[-period:])
+
+
 def build_snapshot(
     symbol: str,
     prices: list[float],
     volumes: list[float],
+    highs: list[float] | None = None,
+    lows: list[float] | None = None,
 ) -> MarketSnapshot:
     if len(prices) < 30:
         raise ValueError("Not enough market data")
@@ -359,6 +411,9 @@ def build_snapshot(
     volume_ratio = volumes[-1] / average_volume if average_volume else 1.0
     trend_strength = abs(ema_fast - ema_slow) / price * 100
     rsi = relative_strength_index(prices)
+    ema_20 = exponential_moving_average(prices, 20)
+    ema_50 = exponential_moving_average(prices, 50)
+    atr = average_true_range(prices, highs=highs, lows=lows)
 
     confidence = 0
     confidence += 25 if ema_fast > ema_slow else 0
@@ -378,6 +433,9 @@ def build_snapshot(
         trend_strength=trend_strength,
         volume_ratio=volume_ratio,
         confidence=confidence,
+        ema_20=ema_20,
+        ema_50=ema_50,
+        atr=atr,
     )
 
 
@@ -564,69 +622,286 @@ def format_large_number(value: float) -> str:
 
 def analyze_market(
     overview: MarketOverview, snapshot: MarketSnapshot
-) -> tuple[str, str, int, str, str]:
-    """Return Persian trend, risk, confidence, recommendation, and explanation."""
-    bullish_points = sum(
-        [
-            snapshot.ema_fast > snapshot.ema_slow,
-            snapshot.macd > snapshot.macd_signal,
-            overview.price_change_24h > 0,
-            snapshot.rsi >= 50,
-        ]
+) -> AnalysisResult:
+    """Build a Persian, weighted multi-factor market analysis."""
+
+    def factor(
+        name: str,
+        score: int,
+        weight: int,
+        reason: str,
+    ) -> AnalysisFactor:
+        normalized_score = max(0, min(100, score))
+        status = (
+            "مثبت"
+            if normalized_score >= 67
+            else "منفی"
+            if normalized_score <= 33
+            else "خنثی"
+        )
+        return AnalysisFactor(
+            name=name,
+            status=status,
+            score=normalized_score,
+            weight=weight,
+            reason=reason,
+        )
+
+    if overview.price_change_24h >= 2:
+        price_factor = factor(
+            "تغییر قیمت ۲۴ ساعت",
+            100,
+            12,
+            f"قیمت در ۲۴ ساعت گذشته {overview.price_change_24h:+.2f}٪ تغییر کرده و شتاب کوتاه‌مدت صعودی است.",
+        )
+    elif overview.price_change_24h <= -2:
+        price_factor = factor(
+            "تغییر قیمت ۲۴ ساعت",
+            0,
+            12,
+            f"قیمت در ۲۴ ساعت گذشته {overview.price_change_24h:+.2f}٪ تغییر کرده و فشار فروش کوتاه‌مدت دیده می‌شود.",
+        )
+    else:
+        price_factor = factor(
+            "تغییر قیمت ۲۴ ساعت",
+            50,
+            12,
+            f"تغییر قیمت {overview.price_change_24h:+.2f}٪ است و حرکت روزانه هنوز جهت قوی ندارد.",
+        )
+
+    if 45 <= snapshot.rsi <= 65:
+        rsi_factor = factor(
+            "شاخص قدرت نسبی",
+            100,
+            14,
+            f"شاخص قدرت نسبی {snapshot.rsi:.1f} است؛ در محدوده متعادل برای ادامه حرکت قرار دارد.",
+        )
+    elif 35 <= snapshot.rsi < 45 or 65 < snapshot.rsi <= 70:
+        rsi_factor = factor(
+            "شاخص قدرت نسبی",
+            50,
+            14,
+            f"شاخص قدرت نسبی {snapshot.rsi:.1f} است؛ از محدوده ایده‌آل فاصله دارد اما هنوز هشدار شدید نیست.",
+        )
+    else:
+        rsi_factor = factor(
+            "شاخص قدرت نسبی",
+            0,
+            14,
+            f"شاخص قدرت نسبی {snapshot.rsi:.1f} است؛ اشباع خرید یا فروش، ریسک برگشت قیمت را بالا می‌برد.",
+        )
+
+    ema_bullish = snapshot.ema_20 > snapshot.ema_50
+    ema_factor = factor(
+        "میانگین‌های نمایی",
+        100 if ema_bullish else 0 if snapshot.ema_20 < snapshot.ema_50 else 50,
+        16,
+        (
+            f"EMA20 ({format_price(snapshot.ema_20)}) بالاتر از EMA50 "
+            f"({format_price(snapshot.ema_50)}) است و روند میان‌مدت صعودی است."
+            if ema_bullish
+            else f"EMA20 ({format_price(snapshot.ema_20)}) پایین‌تر از EMA50 "
+            f"({format_price(snapshot.ema_50)}) است و روند میان‌مدت نزولی است."
+            if snapshot.ema_20 < snapshot.ema_50
+            else "EMA20 و EMA50 تقریباً برابرند و روند میان‌مدت خنثی است."
+        ),
     )
-    bearish_points = sum(
-        [
-            snapshot.ema_fast < snapshot.ema_slow,
-            snapshot.macd < snapshot.macd_signal,
-            overview.price_change_24h < 0,
-            snapshot.rsi < 50,
-        ]
+
+    macd_bullish = snapshot.macd > snapshot.macd_signal
+    macd_factor = factor(
+        "مکدی",
+        100 if macd_bullish else 0 if snapshot.macd < snapshot.macd_signal else 50,
+        14,
+        (
+            "خط مکدی بالاتر از خط سیگنال است و مومنتوم صعودی را تأیید می‌کند."
+            if macd_bullish
+            else "خط مکدی پایین‌تر از خط سیگنال است و مومنتوم صعودی را تأیید نمی‌کند."
+            if snapshot.macd < snapshot.macd_signal
+            else "خط مکدی و خط سیگنال نزدیک‌اند و مومنتوم جهت مشخصی ندارد."
+        ),
     )
 
-    if bullish_points >= 3 and bullish_points > bearish_points:
-        trend = "صعودی"
-    elif bearish_points >= 3 and bearish_points > bullish_points:
-        trend = "نزولی"
-    else:
-        trend = "خنثی"
-
-    volatility = abs(overview.price_change_24h)
-    if volatility >= 8 or snapshot.rsi >= 75 or snapshot.rsi <= 25:
-        risk = "زیاد"
-    elif volatility >= 4 or snapshot.rsi >= 70 or snapshot.rsi <= 30:
-        risk = "متوسط"
-    else:
-        risk = "کم"
-
-    confidence = snapshot.confidence
-    if trend == "صعودی" and overview.price_change_24h > 0:
-        confidence += 10
-    elif trend == "نزولی" and overview.price_change_24h < 0:
-        confidence += 10
-    elif trend == "خنثی":
-        confidence -= 5
-    if risk == "زیاد":
-        confidence -= 10
-    confidence = max(0, min(100, confidence))
-
-    if trend == "صعودی" and risk != "زیاد" and confidence >= 70:
-        recommendation = "خرید"
-    elif trend == "نزولی" and confidence >= 65:
-        recommendation = "صبر"
-    elif risk == "زیاد" or confidence < 50:
-        recommendation = "صبر"
-    else:
-        recommendation = "نگهداری"
-
-    reasons = [
-        f"روند کوتاه‌مدت با مقایسه میانگین‌های نمایی {trend} ارزیابی شد",
-        f"شاخص قدرت نسبی روی {snapshot.rsi:.1f} قرار دارد",
-        f"مکدی {'تأییدکننده حرکت صعودی است' if snapshot.macd > snapshot.macd_signal else 'تأییدکننده حرکت صعودی نیست'}",
-        f"تغییر ۲۴ ساعته {overview.price_change_24h:+.2f} درصد بوده است",
-    ]
     if snapshot.volume_ratio >= 1:
-        reasons.append("حجم فعلی برابر یا بیشتر از میانگین اخیر است")
+        volume_factor = factor(
+            "حجم معاملات",
+            100,
+            10,
+            f"حجم فعلی {snapshot.volume_ratio * 100:.0f}٪ میانگین اخیر است و حرکت قیمت پشتوانه حجمی دارد.",
+        )
+    elif snapshot.volume_ratio >= 0.8:
+        volume_factor = factor(
+            "حجم معاملات",
+            50,
+            10,
+            f"حجم فعلی {snapshot.volume_ratio * 100:.0f}٪ میانگین اخیر است و نزدیک به حد قابل قبول قرار دارد.",
+        )
     else:
-        reasons.append("حجم فعلی پایین‌تر از میانگین اخیر است")
-    explanation = "؛ ".join(reasons) + f". بنابراین پیشنهاد نهایی «{recommendation}» است."
-    return trend, risk, confidence, recommendation, explanation
+        volume_factor = factor(
+            "حجم معاملات",
+            0,
+            10,
+            f"حجم فعلی فقط {snapshot.volume_ratio * 100:.0f}٪ میانگین اخیر است و حرکت قیمت پشتوانه کافی ندارد.",
+        )
+
+    if overview.market_cap_rank is None:
+        rank_factor = factor(
+            "رتبه ارزش بازار",
+            50,
+            8,
+            "رتبه ارزش بازار از داده‌های فعلی در دسترس نیست؛ این عامل خنثی در نظر گرفته شد.",
+        )
+    elif overview.market_cap_rank <= 20:
+        rank_factor = factor(
+            "رتبه ارزش بازار",
+            100,
+            8,
+            f"رتبه بازار {overview.market_cap_rank} است و نقدشوندگی و اعتبار نسبی بالاتری دارد.",
+        )
+    elif overview.market_cap_rank <= 100:
+        rank_factor = factor(
+            "رتبه ارزش بازار",
+            50,
+            8,
+            f"رتبه بازار {overview.market_cap_rank} است و در محدوده متوسط بازار قرار دارد.",
+        )
+    else:
+        rank_factor = factor(
+            "رتبه ارزش بازار",
+            0,
+            8,
+            f"رتبه بازار {overview.market_cap_rank} است و نسبت به دارایی‌های بزرگ‌تر ریسک نقدشوندگی بیشتری دارد.",
+        )
+
+    trend_bullish = snapshot.ema_20 > snapshot.ema_50
+    trend_neutral = snapshot.trend_strength < 0.3
+    trend_factor = factor(
+        "قدرت روند",
+        100 if trend_bullish and not trend_neutral else 50 if trend_neutral else 0,
+        14,
+        (
+            f"قدرت روند {snapshot.trend_strength:.2f}٪ است و جهت غالب صعودی تشخیص داده شد."
+            if trend_bullish and not trend_neutral
+            else f"قدرت روند {snapshot.trend_strength:.2f}٪ است و حرکت بازار قدرت کافی برای یک جهت قطعی ندارد."
+            if trend_neutral
+            else f"قدرت روند {snapshot.trend_strength:.2f}٪ است اما جهت غالب نزولی تشخیص داده شد."
+        ),
+    )
+
+    atr_percent = (snapshot.atr / snapshot.price * 100) if snapshot.price else 0
+    atr_factor = factor(
+        "نوسان ATR",
+        100 if atr_percent <= 2 else 50 if atr_percent <= 4 else 0,
+        12,
+        (
+            f"ATR برابر {format_price(snapshot.atr)} دلار، یعنی {atr_percent:.2f}٪ قیمت است و نوسان کنترل‌شده است."
+            if atr_percent <= 2
+            else f"ATR برابر {format_price(snapshot.atr)} دلار، یعنی {atr_percent:.2f}٪ قیمت است و نوسان متوسط است."
+            if atr_percent <= 4
+            else f"ATR برابر {format_price(snapshot.atr)} دلار، یعنی {atr_percent:.2f}٪ قیمت است و نوسان بالا ریسک ورود را زیاد می‌کند."
+        ),
+    )
+
+    factors = (
+        price_factor,
+        rsi_factor,
+        ema_factor,
+        macd_factor,
+        volume_factor,
+        rank_factor,
+        trend_factor,
+        atr_factor,
+    )
+    confidence = round(
+        sum(item.score * item.weight for item in factors)
+        / sum(item.weight for item in factors)
+    )
+    recommendation = (
+        "خرید بسیار قوی"
+        if confidence >= 85
+        else "خرید"
+        if confidence >= 70
+        else "نگهداری"
+        if confidence >= 55
+        else "صبر"
+        if confidence >= 40
+        else "فروش یا خروج"
+    )
+
+    trend = (
+        "صعودی"
+        if ema_bullish and macd_bullish
+        else "نزولی"
+        if not ema_bullish and not macd_bullish
+        else "خنثی"
+    )
+    risk = (
+        "زیاد"
+        if atr_percent > 4 or snapshot.rsi < 30 or snapshot.rsi > 70
+        else "متوسط"
+        if atr_percent > 2 or abs(overview.price_change_24h) >= 4
+        else "کم"
+    )
+    strongest = sorted(
+        factors,
+        key=lambda item: abs(item.score - 50) * item.weight,
+        reverse=True,
+    )[:3]
+    explanation = "؛ ".join(
+        f"{item.name} با وضعیت {item.status} و وزن {item.weight}٪ بیشترین اثر را داشت: {item.reason}"
+        for item in strongest
+    )
+    return AnalysisResult(
+        trend=trend,
+        risk=risk,
+        factors=factors,
+        confidence=confidence,
+        recommendation=recommendation,
+        explanation=explanation + f" تصمیم نهایی بر اساس امتیاز وزنی {confidence} از ۱۰۰، «{recommendation}» است.",
+    )
+
+
+def entry_conditions(
+    snapshot: MarketSnapshot, confidence: int
+) -> tuple[tuple[str, bool, str], ...]:
+    """Return the six read-only entry checks for the analysis report."""
+    trend_is_bullish_or_neutral = (
+        snapshot.ema_20 >= snapshot.ema_50 or snapshot.trend_strength < 0.3
+    )
+    return (
+        (
+            "EMA20 بالاتر از EMA50",
+            snapshot.ema_20 > snapshot.ema_50,
+            f"EMA20 برابر {format_price(snapshot.ema_20)} و EMA50 برابر {format_price(snapshot.ema_50)} است.",
+        ),
+        (
+            "مکدی صعودی",
+            snapshot.macd > snapshot.macd_signal,
+            "خط مکدی بالاتر از خط سیگنال است."
+            if snapshot.macd > snapshot.macd_signal
+            else "خط مکدی بالاتر از خط سیگنال نیست.",
+        ),
+        (
+            "RSI بین ۴۵ و ۶۵",
+            45 <= snapshot.rsi <= 65,
+            f"مقدار RSI برابر {snapshot.rsi:.1f} است.",
+        ),
+        (
+            "حجم حداقل ۸۰٪ میانگین اخیر",
+            snapshot.volume_ratio >= 0.8,
+            f"حجم فعلی {snapshot.volume_ratio * 100:.0f}٪ میانگین اخیر است.",
+        ),
+        (
+            "قدرت روند صعودی یا خنثی",
+            trend_is_bullish_or_neutral,
+            (
+                f"قدرت روند {snapshot.trend_strength:.2f}٪ است و جهت نزولی قوی نیست."
+                if trend_is_bullish_or_neutral
+                else f"قدرت روند {snapshot.trend_strength:.2f}٪ است و جهت نزولی قوی تشخیص داده شد."
+            ),
+        ),
+        (
+            "شاخص اطمینان حداقل ۷۰ از ۱۰۰",
+            confidence >= 70,
+            f"شاخص اطمینان فعلی {confidence} از ۱۰۰ است.",
+        ),
+    )

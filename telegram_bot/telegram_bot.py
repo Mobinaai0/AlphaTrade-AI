@@ -17,6 +17,7 @@ from paper_trading import (
     PaperStore,
     analyze_market,
     build_snapshot,
+    entry_conditions,
     format_price,
     format_large_number,
     persian_coin_name,
@@ -64,18 +65,59 @@ class TelegramClient:
         return self.request("getUpdates", payload)
 
 
+_COINGECKO_RETRY_DELAYS = (3, 8, 20)  # seconds between retries on 429
+
+
+def _coingecko_get(url: str) -> Any:
+    """GET a CoinGecko URL with automatic retry on HTTP 429 (rate limit)."""
+    last_exc: Exception | None = None
+    for attempt, delay in enumerate(
+        [0] + list(_COINGECKO_RETRY_DELAYS), start=1
+    ):
+        if delay:
+            logger.warning(
+                "CoinGecko rate-limited; retrying in %ds (attempt %d)…",
+                delay,
+                attempt,
+            )
+            time.sleep(delay)
+        try:
+            req = urllib.request.Request(
+                url, headers={"User-Agent": "PersianPaperTradingBot/1.0"}
+            )
+            with urllib.request.urlopen(req, timeout=30) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            if exc.code == 429:
+                last_exc = exc
+                continue
+            logger.error(
+                "CoinGecko HTTP %d for %s: %s",
+                exc.code,
+                url,
+                exc.read().decode("utf-8", errors="replace")[:300],
+            )
+            raise
+        except Exception as exc:
+            logger.error("CoinGecko request failed for %s: %s", url, exc)
+            raise
+    logger.error(
+        "CoinGecko still rate-limiting after %d retries: %s",
+        len(_COINGECKO_RETRY_DELAYS),
+        url,
+    )
+    raise RuntimeError(
+        "سرور CoinGecko به دلیل محدودیت درخواست پاسخ نداد."
+    ) from last_exc
+
+
 def fetch_market_data(symbol: str) -> tuple[list[float], list[float]]:
     coin_id = COIN_IDS[symbol]
     url = MARKET_API_URL.format(coin_id=coin_id)
     query = urllib.parse.urlencode(
         {"vs_currency": "usd", "days": "30", "interval": "hourly"}
     )
-    request = urllib.request.Request(
-        f"{url}?{query}",
-        headers={"User-Agent": "PersianPaperTradingBot/1.0"},
-    )
-    with urllib.request.urlopen(request, timeout=30) as response:
-        payload = json.loads(response.read().decode("utf-8"))
+    payload = _coingecko_get(f"{url}?{query}")
     prices = [float(item[1]) for item in payload.get("prices", [])]
     volumes = [float(item[1]) for item in payload.get("total_volumes", [])]
     if len(prices) < 30 or not volumes:
@@ -97,12 +139,9 @@ def fetch_market_overview(symbol: str) -> MarketOverview:
             "sparkline": "false",
         }
     )
-    request = urllib.request.Request(
-        f"{MARKET_OVERVIEW_API_URL.format(coin_id=coin_id)}?{query}",
-        headers={"User-Agent": "PersianPaperTradingBot/1.0"},
+    payload = _coingecko_get(
+        f"{MARKET_OVERVIEW_API_URL.format(coin_id=coin_id)}?{query}"
     )
-    with urllib.request.urlopen(request, timeout=30) as response:
-        payload = json.loads(response.read().decode("utf-8"))
     market_data = payload.get("market_data") or {}
     current_price = float((market_data.get("current_price") or {}).get("usd", 0))
     if current_price <= 0:
@@ -291,14 +330,40 @@ class BotApplication:
             overview = fetch_market_overview(symbol)
             prices, volumes = fetch_market_data(symbol)
             snapshot = build_snapshot(symbol, prices, volumes)
-            trend, risk, confidence, recommendation, explanation = analyze_market(
-                overview, snapshot
-            )
+            analysis = analyze_market(overview, snapshot)
+            checks = entry_conditions(snapshot, analysis.confidence)
             rank = (
                 f"رتبه {overview.market_cap_rank}"
                 if overview.market_cap_rank is not None
                 else "نامشخص"
             )
+            factor_lines = [
+                f"{'✅' if item.status == 'مثبت' else '➖' if item.status == 'خنثی' else '❌'} "
+                f"{item.name}: {item.status} — امتیاز {item.score} از ۱۰۰، وزن {item.weight}٪\n"
+                f"دلیل: {item.reason}"
+                for item in analysis.factors
+            ]
+            check_lines = [
+                f"{'✅' if passed else '❌'} {name}\nدلیل: {reason}"
+                for name, passed, reason in checks
+            ]
+            all_entry_conditions_pass = all(passed for _, passed, _ in checks)
+            if all_entry_conditions_pass:
+                entry_result = [
+                    "🟢 نتیجه:",
+                    "شرایط ورود به معامله مناسب است.",
+                ]
+            else:
+                failed_conditions = [
+                    name for name, passed, _ in checks if not passed
+                ]
+                entry_result = [
+                    "🔴 نتیجه:",
+                    "فعلاً وارد معامله نشو.",
+                    "",
+                    "شرایط ناموفق:",
+                    "، ".join(failed_conditions),
+                ]
             report = "\n".join(
                 [
                     f"📊 گزارش تحلیل {persian_coin_name(symbol)}",
@@ -309,23 +374,42 @@ class BotApplication:
                     f"🏦 ارزش بازار: {format_large_number(overview.market_cap)} دلار",
                     f"📦 حجم معاملات ۲۴ ساعت: {format_large_number(overview.volume_24h)} دلار",
                     "",
-                    f"روند بازار: {trend}",
-                    f"سطح ریسک: {risk}",
-                    f"شاخص اطمینان: {confidence} از ۱۰۰",
-                    f"پیشنهاد: {recommendation}",
+                    "📋 ارزیابی عوامل مؤثر",
                     "",
-                    "دلیل تحلیل:",
-                    explanation,
+                    *factor_lines,
+                    "",
+                    f"روند بازار: {analysis.trend}",
+                    f"سطح ریسک: {analysis.risk}",
+                    f"شاخص اطمینان وزنی: {analysis.confidence} از ۱۰۰",
+                    f"پیشنهاد: {analysis.recommendation}",
+                    "",
+                    "🚦 بررسی شرایط ورود",
+                    "",
+                    *check_lines,
+                    "",
+                    *entry_result,
+                    "",
+                    "🧠 چرا این تصمیم گرفته شد؟",
+                    analysis.explanation,
                     "",
                     "این گزارش صرفاً تحلیلی است و هیچ معامله‌ای انجام نمی‌دهد.",
                 ]
             )
             self.client.send_message(chat_id, report)
-        except Exception:
-            logger.exception("Market analysis failed for %s", symbol)
+        except RuntimeError as exc:
+            logger.error("Market analysis RuntimeError for %s: %s", symbol, exc)
             self.client.send_message(
                 chat_id,
-                "در حال حاضر دریافت داده‌های بازار ممکن نیست. لطفاً کمی بعد دوباره تلاش کنید.",
+                f"⚠️ تحلیل {persian_coin_name(symbol)} ناموفق بود.\n\n"
+                "احتمالاً سرور CoinGecko در حال حاضر بیش از حد درخواست دریافت می‌کند.\n"
+                "لطفاً یک دقیقه صبر کنید و دوباره تلاش کنید.",
+            )
+        except Exception:
+            logger.exception("Market analysis unexpected error for %s", symbol)
+            self.client.send_message(
+                chat_id,
+                f"⚠️ خطای غیرمنتظره در تحلیل {persian_coin_name(symbol)}.\n"
+                "لطفاً کمی بعد دوباره تلاش کنید.",
             )
 
     def _status(self, user_id: int, chat_id: int, _: str) -> None:
