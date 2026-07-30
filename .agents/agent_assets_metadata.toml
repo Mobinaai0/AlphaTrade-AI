@@ -6,3 +6,9 @@ id = "6tcx6in9JaVrNFMVB-OCx"
 uri = "file://persian_paper_trading_bot_backup.zip"
 type = "unspecified"
 title = "Persian Paper Trading Bot — Source Backup"
+
+[[outputs]]
+id = "em4w3g7CQzWpZbckG6OoO"
+uri = "file://AlphaTrade-AI-v1.1.zip"
+type = "unspecified"
+title = "AlphaTrade-AI-v1.1 — Source Backup"
