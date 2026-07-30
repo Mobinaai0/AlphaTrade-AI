@@ -429,15 +429,38 @@ class BotApplication:
             f"معاملات خودکار: {'فعال' if account['auto_trading_enabled'] else 'غیرفعال'}",
         ]
         if position:
-            lines.extend(
-                [
-                    "",
-                    "معامله‌ی باز:",
-                    f"قیمت ورود: {format_price(position.entry_price)} دلار",
-                    f"حد ضرر: {format_price(position.stop_loss)} دلار",
-                    f"حد سود: {format_price(position.take_profit)} دلار",
-                ]
-            )
+            position_lines = [
+                "",
+                f"📈 معامله‌ی باز — {persian_coin_name(position.symbol)}",
+                f"قیمت ورود: {format_price(position.entry_price)} دلار",
+                f"حد ضرر: {format_price(position.stop_loss)} دلار",
+                f"حد سود: {format_price(position.take_profit)} دلار",
+            ]
+            try:
+                overview = fetch_market_overview(position.symbol)
+                current_price = overview.current_price
+                unrealized_pnl = (
+                    (current_price - position.entry_price) * position.quantity
+                )
+                unrealized_pct = (
+                    (current_price - position.entry_price)
+                    / position.entry_price
+                    * 100
+                )
+                pnl_emoji = "🟢" if unrealized_pnl >= 0 else "🔴"
+                position_lines.extend(
+                    [
+                        f"قیمت فعلی: {format_price(current_price)} دلار",
+                        f"{pnl_emoji} سود/زیان باز: {unrealized_pnl:+,.2f} دلار"
+                        f" ({unrealized_pct:+.2f}٪)",
+                    ]
+                )
+            except Exception:
+                logger.warning(
+                    "Could not fetch live price for open position %s",
+                    position.symbol,
+                )
+            lines.extend(position_lines)
         else:
             lines.extend(["", "در حال حاضر معامله‌ی بازی ندارید."])
         self.client.send_message(chat_id, "\n".join(lines))
